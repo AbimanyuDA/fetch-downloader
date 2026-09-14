@@ -1,0 +1,98 @@
+# ==========================================
+# macOS System Files
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+ehthumbs.db
+Thumbs.db
+
+# ==========================================
+# Swift & Xcode Build Artifacts
+# ==========================================
+.build/
+build/
+DerivedData/
+*.app
+MediaFetch.app/
+*.dSYM/
+*.ipa
+*.pkg
+
+# Xcode User Data & Schemes
+xcuserdata/
+*.xcuserdatad/
+*.xcuserstate
+*.xcbkptlist
+*.xcuserworkspace
+!default.mode1v3
+!default.mode2v3
+!default.pbxuser
+!default.perspectivev3
+
+# Xcode workspace and project specific exclusions
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/project.xcworkspace/
+*.xcodeproj/project.xcworkspace/*
+!*.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+*.xcworkspace/*
+!*.xcworkspace/contents.xcworkspacedata
+!*.xcworkspace/xcshareddata/
+
+# Swift Package Manager
+Packages/
+Package.pins
+Package.resolved
+.swiftpm/
+!.swiftpm/xcode/
+
+# ==========================================
+# Node.js & Next.js (Website)
+# ==========================================
+node_modules/
+website/node_modules/
+.next/
+website/.next/
+out/
+website/out/
+.turbo/
+website/.turbo/
+
+# Next.js Build Logs & Cache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Next.js Bundle Analyzer
+.next-analyze/
+
+# TypeScript Cache
+*.tsbuildinfo
+next-env.d.ts
+
+# ==========================================
+# Environment Variables & Secrets
+# ==========================================
+.env
+.env*.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ==========================================
+# Editor & IDE Settings
+# ==========================================
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.sublime-project
+*.sublime-workspace
