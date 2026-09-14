@@ -65,3 +65,31 @@ export function detectPlatform(url: string): { platform: MediaPlatform; platform
     return { platform: 'generic', platformName: 'Web Media' };
   }
 }
+
+export function triggerBrowserDownload(downloadUrl: string, filename: string) {
+  if (typeof window === 'undefined') return;
+
+  // Blob or data URLs
+  if (downloadUrl.startsWith('blob:') || downloadUrl.startsWith('data:')) {
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+    }, 1000);
+    return;
+  }
+
+  // Stream directly through download endpoint with Content-Disposition: attachment
+  const secureEndpoint = `/api/download/file?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}`;
+  
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.src = secureEndpoint;
+  document.body.appendChild(iframe);
+  setTimeout(() => {
+    document.body.removeChild(iframe);
+  }, 30000);
+}

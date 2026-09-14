@@ -75,6 +75,7 @@ yarn-error.log*
 # TypeScript Cache
 *.tsbuildinfo
 next-env.d.ts
+*-watch.html
 
 # ==========================================
 # Environment Variables & Secrets

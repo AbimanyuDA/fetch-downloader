@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Video,
   Music,
@@ -11,11 +11,17 @@ import {
   Clock,
   AlertCircle,
   Loader2,
+  RotateCcw,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { MediaInfo, MediaFormat, HistoryItem } from '@/lib/types';
-import { sanitizeFilename } from '@/lib/utils';
-import { parseTimeToSeconds, trimAudioFromUrl, trimVideoFromUrl } from '@/lib/mediaTrimmer';
+import { sanitizeFilename, triggerBrowserDownload } from '@/lib/utils';
+import {
+  parseTimeToSeconds,
+  secondsToTimeString,
+  trimAudioFromUrl,
+  trimVideoFromUrl,
+} from '@/lib/mediaTrimmer';
 
 interface MediaInspectorProps {
   media: MediaInfo;
@@ -30,14 +36,27 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
   const [downloadSuccess, setDownloadSuccess] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
+  // Total duration in seconds
+  const totalDuration = media.duration && media.duration > 0 ? media.duration : 180;
+
   // Trim range states
   const [enableTrim, setEnableTrim] = useState<boolean>(false);
-  const [trimStart, setTrimStart] = useState<string>('00:00');
-  const [trimEnd, setTrimEnd] = useState<string>(media.durationFormatted && media.durationFormatted !== 'Video' ? media.durationFormatted : '01:00');
+  const [startSeconds, setStartSeconds] = useState<number>(0);
+  const [endSeconds, setEndSeconds] = useState<number>(totalDuration);
+  const [trimStartText, setTrimStartText] = useState<string>('00:00');
+  const [trimEndText, setTrimEndText] = useState<string>(secondsToTimeString(totalDuration));
+
+  // Sync initial end time when media changes
+  useEffect(() => {
+    const dur = media.duration && media.duration > 0 ? media.duration : 180;
+    setStartSeconds(0);
+    setEndSeconds(dur);
+    setTrimStartText('00:00');
+    setTrimEndText(secondsToTimeString(dur));
+  }, [media]);
 
   const videoFormats = media.formats.filter((f) => f.type === 'video');
   const audioFormats = media.formats.filter((f) => f.type === 'audio');
-
   const currentFormats = activeTab === 'video' ? videoFormats : audioFormats;
 
   const triggerConfetti = () => {
@@ -49,10 +68,46 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
     });
   };
 
+  // Adjust time helpers
+  const handleAdjustStart = (delta: number) => {
+    const next = Math.max(0, Math.min(endSeconds - 1, startSeconds + delta));
+    setStartSeconds(next);
+    setTrimStartText(secondsToTimeString(next));
+  };
+
+  const handleAdjustEnd = (delta: number) => {
+    const next = Math.max(startSeconds + 1, Math.min(totalDuration, endSeconds + delta));
+    setEndSeconds(next);
+    setTrimEndText(secondsToTimeString(next));
+  };
+
+  const handleStartTextBlur = () => {
+    const parsed = parseTimeToSeconds(trimStartText);
+    const clamped = Math.max(0, Math.min(endSeconds - 1, parsed));
+    setStartSeconds(clamped);
+    setTrimStartText(secondsToTimeString(clamped));
+  };
+
+  const handleEndTextBlur = () => {
+    const parsed = parseTimeToSeconds(trimEndText);
+    const clamped = Math.max(startSeconds + 1, Math.min(totalDuration, parsed));
+    setEndSeconds(clamped);
+    setTrimEndText(secondsToTimeString(clamped));
+  };
+
+  const handleResetTrim = () => {
+    setStartSeconds(0);
+    setEndSeconds(totalDuration);
+    setTrimStartText('00:00');
+    setTrimEndText(secondsToTimeString(totalDuration));
+  };
+
+  const clipDurationSec = Math.max(0, endSeconds - startSeconds);
+
   const handleDownload = async (format: MediaFormat) => {
     setDownloadingId(format.id);
     setDownloadProgress(5);
-    setDownloadStatusText('Starting conversion...');
+    setDownloadStatusText('Connecting to stream engine...');
     setDownloadSuccess(null);
     setDownloadError(null);
 
@@ -61,22 +116,22 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
       let finalDownloadUrl = '';
 
       // Validate trim bounds if enabled
-      let startSec = 0;
-      let endSec = 0;
+      let startSec = startSeconds;
+      let endSec = endSeconds;
       if (enableTrim) {
-        startSec = parseTimeToSeconds(trimStart);
-        endSec = parseTimeToSeconds(trimEnd);
+        startSec = parseTimeToSeconds(trimStartText);
+        endSec = parseTimeToSeconds(trimEndText);
         if (endSec <= startSec) {
           throw new Error('End Time must be greater than Start Time.');
         }
       }
 
-      // If direct stream URL is already known and doesn't require backend job
-      if (format.isDirect && format.url.startsWith('http') && media.platform !== 'youtube') {
+      // If direct stream URL is already known and doesn't require backend conversion
+      if (format.isDirect && format.url.startsWith('http') && !format.url.includes('youtube.com')) {
         finalDownloadUrl = format.url;
       } else {
         // Step 1: Initialize serverless conversion task
-        setDownloadStatusText('Connecting to stream engine...');
+        setDownloadStatusText('Preparing high-speed media stream...');
         const initRes = await fetch('/api/download', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -91,7 +146,7 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
 
         const initJson = await initRes.json();
         if (!initJson.success) {
-          throw new Error(initJson.error || 'Could not start conversion. Please try another quality.');
+          throw new Error(initJson.error || 'Could not initialize download. Please try another quality.');
         }
 
         if (initJson.downloadUrl) {
@@ -100,7 +155,7 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
           // Step 2: Poll progress without blocking Vercel serverless execution
           let resolved = false;
           let attempts = 0;
-          const maxAttempts = 75; // Up to ~2 minutes for very long live stream recordings
+          const maxAttempts = 60;
 
           while (!resolved && attempts < maxAttempts) {
             attempts++;
@@ -134,14 +189,19 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
                 }
               }
             } catch (pollErr) {
-              // Retry on next cycle
+              // Retry on next interval
             }
           }
 
           if (!resolved || !finalDownloadUrl) {
-            throw new Error('Conversion is taking longer than expected. Please try again or select a different resolution.');
+            throw new Error('Conversion took longer than expected. Please select another quality or try again.');
           }
         }
+      }
+
+      // Safety check: JANGAN PERNAH gunakan link youtube.com sebagai final download
+      if (finalDownloadUrl.includes('youtube.com/watch') || finalDownloadUrl.includes('youtu.be/')) {
+        throw new Error('Stream URL is not direct. Please choose another format option.');
       }
 
       // Step 3: Handle Trim Range if enabled
@@ -149,48 +209,40 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
         setDownloadProgress(95);
 
         if (format.type === 'audio') {
-          setDownloadStatusText(`Trimming audio (${trimStart} to ${trimEnd})...`);
+          setDownloadStatusText(`Trimming audio (${trimStartText} to ${trimEndText})...`);
           const trimmedBlob = await trimAudioFromUrl(finalDownloadUrl, startSec, endSec, (msg) => {
             setDownloadStatusText(msg);
           });
 
           const blobUrl = URL.createObjectURL(trimmedBlob);
-          const safeTrimFilename = `${filename}_trimmed_${trimStart.replace(':', '-')}_to_${trimEnd.replace(':', '-')}.wav`;
+          const safeTrimFilename = `${filename}_trimmed_${trimStartText.replace(':', '-')}_to_${trimEndText.replace(':', '-')}.wav`;
 
-          const a = document.createElement('a');
-          a.href = blobUrl;
-          a.download = safeTrimFilename;
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(() => {
-            document.body.removeChild(a);
-            URL.revokeObjectURL(blobUrl);
-          }, 1500);
+          triggerBrowserDownload(blobUrl, safeTrimFilename);
 
           setDownloadProgress(100);
-          setDownloadSuccess(`Downloaded trimmed audio (${trimStart} to ${trimEnd})!`);
+          setDownloadSuccess(`Downloaded trimmed audio (${trimStartText} to ${trimEndText})!`);
           triggerConfetti();
 
           onDownloaded({
             id: `${media.url}_${Date.now()}`,
-            title: `${media.title} [Trimmed ${trimStart}-${trimEnd}]`,
+            title: `${media.title} [Trimmed ${trimStartText}-${trimEndText}]`,
             author: media.author,
             thumbnail: media.thumbnail,
             platform: media.platform,
             url: media.url,
             downloadedAt: Date.now(),
-            formatLabel: `Trimmed Audio (${trimStart}-${trimEnd})`,
+            formatLabel: `Trimmed Audio (${trimStartText}-${trimEndText})`,
           });
 
           setTimeout(() => {
             setDownloadingId(null);
             setDownloadProgress(0);
             setDownloadStatusText('');
-          }, 3000);
+          }, 3500);
           return;
         } else {
           // Video trimming
-          setDownloadStatusText(`Trimming video (${trimStart} to ${trimEnd})...`);
+          setDownloadStatusText(`Trimming video (${trimStartText} to ${trimEndText})...`);
           try {
             const { blob: trimmedVideoBlob, extension: vidExt } = await trimVideoFromUrl(
               finalDownloadUrl,
@@ -200,61 +252,45 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
             );
 
             const blobUrl = URL.createObjectURL(trimmedVideoBlob);
-            const safeTrimFilename = `${filename}_trimmed_${trimStart.replace(':', '-')}_to_${trimEnd.replace(':', '-')}.${vidExt}`;
+            const safeTrimFilename = `${filename}_trimmed_${trimStartText.replace(':', '-')}_to_${trimEndText.replace(':', '-')}.${vidExt}`;
 
-            const a = document.createElement('a');
-            a.href = blobUrl;
-            a.download = safeTrimFilename;
-            document.body.appendChild(a);
-            a.click();
-            setTimeout(() => {
-              document.body.removeChild(a);
-              URL.revokeObjectURL(blobUrl);
-            }, 1500);
+            triggerBrowserDownload(blobUrl, safeTrimFilename);
 
             setDownloadProgress(100);
-            setDownloadSuccess(`Downloaded trimmed video (${trimStart} to ${trimEnd})!`);
+            setDownloadSuccess(`Downloaded trimmed video (${trimStartText} to ${trimEndText})!`);
             triggerConfetti();
 
             onDownloaded({
               id: `${media.url}_${Date.now()}`,
-              title: `${media.title} [Trimmed ${trimStart}-${trimEnd}]`,
+              title: `${media.title} [Trimmed ${trimStartText}-${trimEndText}]`,
               author: media.author,
               thumbnail: media.thumbnail,
               platform: media.platform,
               url: media.url,
               downloadedAt: Date.now(),
-              formatLabel: `Trimmed ${vidExt.toUpperCase()} (${trimStart}-${trimEnd})`,
+              formatLabel: `Trimmed Video (${trimStartText}-${trimEndText})`,
             });
 
             setTimeout(() => {
               setDownloadingId(null);
               setDownloadProgress(0);
               setDownloadStatusText('');
-            }, 3000);
+            }, 3500);
             return;
           } catch (vidErr: any) {
-            console.warn('Video trim fallback to full download:', vidErr);
+            // DO NOT silently download full video! Report error to user
+            throw new Error(`Video trimming failed: ${vidErr.message || 'Stream format could not be trimmed'}. You can disable "Custom Trim Range" to download the full video, or switch to Audio to trim MP3/WAV.`);
           }
         }
       }
 
-      // Step 4: Standard Full Download
+      // Step 4: Standard Full Download directly to Mac Downloads folder
       setDownloadProgress(100);
-      setDownloadStatusText('Download ready! Starting transfer...');
+      setDownloadStatusText('Starting download to your Mac...');
 
-      const a = document.createElement('a');
-      a.href = finalDownloadUrl;
-      a.setAttribute('download', `${filename}.${format.extension}`);
-      a.setAttribute('target', '_blank');
-      a.rel = 'noopener noreferrer';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => {
-        document.body.removeChild(a);
-      }, 500);
+      triggerBrowserDownload(finalDownloadUrl, `${filename}.${format.extension}`);
 
-      setDownloadSuccess(`Downloaded ${format.label}!`);
+      setDownloadSuccess(`Downloaded ${format.label}! Check your Mac Downloads folder.`);
       triggerConfetti();
 
       onDownloaded({
@@ -272,7 +308,7 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
         setDownloadingId(null);
         setDownloadProgress(0);
         setDownloadStatusText('');
-      }, 3000);
+      }, 3500);
     } catch (err: any) {
       setDownloadingId(null);
       setDownloadProgress(0);
@@ -316,7 +352,7 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
         </div>
 
         {/* Video Title & Meta details */}
-        <div className="flex-1 min-w-0 flex flex-col justify-between">
+        <div className="flex-1 min-w-0 flex flex-col justify-between w-full">
           <div>
             <h2 className="text-lg sm:text-xl font-bold text-white leading-snug line-clamp-2 tracking-tight">
               {media.title}
@@ -340,9 +376,9 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
             </div>
           </div>
 
-          {/* Trim Range Simulator */}
-          <div className={`mt-4 p-3.5 rounded-2xl border transition-all ${
-            enableTrim ? 'bg-indigo-500/10 border-indigo-500/30 shadow-lg shadow-indigo-500/10' : 'bg-white/[0.03] border-white/5'
+          {/* Trim Range Simulator (Enhanced with Sliders & Quick Step) */}
+          <div className={`mt-4 p-4 rounded-2xl border transition-all ${
+            enableTrim ? 'bg-indigo-500/10 border-indigo-500/40 shadow-lg shadow-indigo-500/10' : 'bg-white/[0.03] border-white/5'
           }`}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
@@ -354,42 +390,132 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
                   {enableTrim ? 'Active' : 'Disabled'}
                 </span>
               </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={enableTrim}
-                  onChange={(e) => setEnableTrim(e.target.checked)}
-                  className="sr-only peer"
-                />
-                <div className="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
-              </label>
+              <div className="flex items-center gap-3">
+                {enableTrim && (
+                  <button
+                    onClick={handleResetTrim}
+                    className="text-[11px] text-gray-400 hover:text-white flex items-center gap-1 hover:underline cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    Reset
+                  </button>
+                )}
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={enableTrim}
+                    onChange={(e) => setEnableTrim(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                </label>
+              </div>
             </div>
 
             {enableTrim && (
-              <div className="mt-3.5 pt-3 border-t border-white/10 grid grid-cols-2 gap-3 text-xs animate-fadeIn">
-                <div>
-                  <label className="text-gray-300 font-medium block mb-1">Start Time (MM:SS)</label>
-                  <input
-                    type="text"
-                    value={trimStart}
-                    onChange={(e) => setTrimStart(e.target.value)}
-                    placeholder="00:00"
-                    className="w-full px-3 py-2 rounded-xl bg-black/60 border border-indigo-500/40 text-white font-mono text-xs focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition-all"
-                  />
+              <div className="mt-3.5 pt-3 border-t border-white/10 space-y-3.5 text-xs animate-fadeIn">
+                {/* Visual Timeline Bar */}
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-[11px] text-gray-400 font-mono">
+                    <span>Start: {trimStartText}</span>
+                    <span className="text-indigo-300 font-semibold">
+                      Clip: {secondsToTimeString(clipDurationSec)} ({Math.round((clipDurationSec / totalDuration) * 100)}%)
+                    </span>
+                    <span>End: {trimEndText}</span>
+                  </div>
+
+                  {/* Dual Slider Timeline */}
+                  <div className="relative w-full h-3 bg-black/60 rounded-full overflow-hidden border border-white/10">
+                    <div
+                      className="absolute top-0 bottom-0 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full opacity-80"
+                      style={{
+                        left: `${(startSeconds / totalDuration) * 100}%`,
+                        width: `${Math.max(2, ((endSeconds - startSeconds) / totalDuration) * 100)}%`,
+                      }}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="text-gray-300 font-medium block mb-1">End Time (MM:SS)</label>
-                  <input
-                    type="text"
-                    value={trimEnd}
-                    onChange={(e) => setTrimEnd(e.target.value)}
-                    placeholder="05:00"
-                    className="w-full px-3 py-2 rounded-xl bg-black/60 border border-indigo-500/40 text-white font-mono text-xs focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition-all"
-                  />
+
+                {/* Pickers with Stepper Buttons */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Start Time Section */}
+                  <div className="p-3 rounded-xl bg-black/40 border border-white/10">
+                    <label className="text-gray-300 font-medium block mb-1.5 text-[11px]">
+                      Start Time (MM:SS)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={trimStartText}
+                        onChange={(e) => setTrimStartText(e.target.value)}
+                        onBlur={handleStartTextBlur}
+                        placeholder="00:00"
+                        className="w-24 px-2.5 py-1.5 rounded-lg bg-black/80 border border-indigo-500/40 text-white font-mono text-center text-xs focus:outline-none focus:border-indigo-400 transition-all"
+                      />
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => handleAdjustStart(-10)}
+                          className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[10px] text-gray-300 transition-all cursor-pointer"
+                        >
+                          -10s
+                        </button>
+                        <button
+                          onClick={() => handleAdjustStart(10)}
+                          className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[10px] text-gray-300 transition-all cursor-pointer"
+                        >
+                          +10s
+                        </button>
+                        <button
+                          onClick={() => handleAdjustStart(60)}
+                          className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[10px] text-gray-300 transition-all cursor-pointer"
+                        >
+                          +1m
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* End Time Section */}
+                  <div className="p-3 rounded-xl bg-black/40 border border-white/10">
+                    <label className="text-gray-300 font-medium block mb-1.5 text-[11px]">
+                      End Time (MM:SS)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={trimEndText}
+                        onChange={(e) => setTrimEndText(e.target.value)}
+                        onBlur={handleEndTextBlur}
+                        placeholder="03:00"
+                        className="w-24 px-2.5 py-1.5 rounded-lg bg-black/80 border border-indigo-500/40 text-white font-mono text-center text-xs focus:outline-none focus:border-indigo-400 transition-all"
+                      />
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => handleAdjustEnd(-60)}
+                          className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[10px] text-gray-300 transition-all cursor-pointer"
+                        >
+                          -1m
+                        </button>
+                        <button
+                          onClick={() => handleAdjustEnd(-10)}
+                          className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[10px] text-gray-300 transition-all cursor-pointer"
+                        >
+                          -10s
+                        </button>
+                        <button
+                          onClick={() => handleAdjustEnd(10)}
+                          className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[10px] text-gray-300 transition-all cursor-pointer"
+                        >
+                          +10s
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div className="col-span-2 text-[11px] text-indigo-300/80 flex items-center gap-1.5">
-                  <Scissors className="w-3 h-3 text-indigo-400 shrink-0" />
-                  <span>Only the segment between {trimStart} and {trimEnd} will be cut and downloaded.</span>
+
+                <div className="text-[11px] text-indigo-300/90 flex items-center gap-1.5 bg-indigo-500/10 p-2 rounded-lg border border-indigo-500/20">
+                  <Scissors className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span>Only the {secondsToTimeString(clipDurationSec)} segment ({trimStartText} to {trimEndText}) will be downloaded.</span>
                 </div>
               </div>
             )}
@@ -498,7 +624,7 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
                       ) : (
                         <>
                           {enableTrim ? <Scissors className="w-3.5 h-3.5 text-indigo-200" /> : <Download className="w-3.5 h-3.5" />}
-                          <span>{enableTrim ? `Download Trimmed (${trimStart}-${trimEnd})` : `Download ${format.extension.toUpperCase()}`}</span>
+                          <span>{enableTrim ? `Download Trimmed (${trimStartText}-${trimEndText})` : `Download ${format.extension.toUpperCase()}`}</span>
                         </>
                       )}
                     </button>
@@ -511,14 +637,17 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
 
         {/* Progress bar if active */}
         {downloadingId && (
-          <div className="mt-4 p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 animate-fadeIn">
-            <div className="flex justify-between text-xs text-indigo-300 mb-1.5 font-medium">
-              <span>{downloadStatusText || 'Preparing stream...'}</span>
-              <span>{downloadProgress}%</span>
+          <div className="mt-4 p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 animate-fadeIn">
+            <div className="flex justify-between text-xs text-indigo-300 mb-2 font-medium">
+              <span className="flex items-center gap-1.5">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                {downloadStatusText || 'Preparing stream...'}
+              </span>
+              <span className="font-mono">{downloadProgress}%</span>
             </div>
             <div className="w-full h-1.5 bg-black/40 rounded-full overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-indigo-500 to-pink-500 transition-all duration-300"
+                className="h-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 transition-all duration-300"
                 style={{ width: `${downloadProgress}%` }}
               />
             </div>
@@ -527,17 +656,20 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
 
         {/* Error notification */}
         {downloadError && (
-          <div className="mt-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2 animate-fadeIn">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{downloadError}</span>
+          <div className="mt-4 p-3.5 rounded-xl bg-red-500/10 border border-red-500/25 text-red-400 text-xs flex items-start gap-2.5 animate-fadeIn">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-semibold">Download Failed</p>
+              <p className="text-red-400/90 mt-0.5 leading-relaxed">{downloadError}</p>
+            </div>
           </div>
         )}
 
         {/* Success toast notification */}
         {downloadSuccess && (
-          <div className="mt-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs flex items-center gap-2 animate-fadeIn">
-            <CheckCircle2 className="w-4 h-4 shrink-0" />
-            <span>{downloadSuccess} Check your browser Downloads folder!</span>
+          <div className="mt-4 p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 text-xs flex items-center gap-2.5 animate-fadeIn">
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+            <span className="font-medium">{downloadSuccess}</span>
           </div>
         )}
       </div>

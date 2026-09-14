@@ -53,29 +53,48 @@ export async function extractYouTube(url: string): Promise<MediaInfo> {
     throw new Error('Invalid YouTube URL: could not extract Video ID. Please ensure the link is a valid YouTube video, shorts, or live stream.');
   }
 
-  // 1. Get oEmbed metadata as baseline
+  // 1. Get metadata as baseline
   let title = 'YouTube Video';
   let author = 'YouTube Creator';
   let authorUrl = `https://www.youtube.com/watch?v=${id}`;
   let thumbnail = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+  let duration = 0;
 
   try {
-    const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`, {
-      next: { revalidate: 300 },
-    });
-    if (oembedRes.ok) {
-      const oembed = await oembedRes.json();
+    const [oembedRes, pageRes] = await Promise.allSettled([
+      fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`, {
+        next: { revalidate: 300 },
+      }),
+      fetch(`https://www.youtube.com/watch?v=${id}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        next: { revalidate: 300 },
+      }),
+    ]);
+
+    if (oembedRes.status === 'fulfilled' && oembedRes.value.ok) {
+      const oembed = await oembedRes.value.json();
       if (oembed.title) title = oembed.title;
       if (oembed.author_name) author = oembed.author_name;
       if (oembed.author_url) authorUrl = oembed.author_url;
       if (oembed.thumbnail_url) thumbnail = oembed.thumbnail_url;
     }
+
+    if (pageRes.status === 'fulfilled' && pageRes.value.ok) {
+      const html = await pageRes.value.text();
+      const lengthMatch = html.match(/"lengthSeconds":"(\d+)"/) || html.match(/"approxDurationMs":"(\d+)"/);
+      if (lengthMatch && lengthMatch[1]) {
+        const val = Number(lengthMatch[1]);
+        duration = val > 10000 ? Math.floor(val / 1000) : val;
+      }
+    }
   } catch (err) {
-    console.warn('oEmbed fetch error:', err);
+    console.warn('Metadata fetch error:', err);
   }
 
   // 2. Fetch streams from Invidious instance pool
-  let duration = 0;
   const formats: MediaFormat[] = [];
 
   for (const instance of INVIDIOUS_INSTANCES) {
