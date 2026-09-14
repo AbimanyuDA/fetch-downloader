@@ -37,18 +37,22 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
   // Total duration in seconds
-  const totalDuration = media.duration && media.duration > 0 ? media.duration : 180;
+  const totalDuration = media.duration && media.duration > 0 ? media.duration : 0;
+  const defaultEndSec = totalDuration > 0 ? totalDuration : 600;
 
   // Trim range states
   const [enableTrim, setEnableTrim] = useState<boolean>(false);
   const [startSeconds, setStartSeconds] = useState<number>(0);
-  const [endSeconds, setEndSeconds] = useState<number>(totalDuration);
+  const [endSeconds, setEndSeconds] = useState<number>(defaultEndSec);
   const [trimStartText, setTrimStartText] = useState<string>('00:00');
-  const [trimEndText, setTrimEndText] = useState<string>(secondsToTimeString(totalDuration));
+  const [trimEndText, setTrimEndText] = useState<string>(secondsToTimeString(defaultEndSec));
+
+  // Dynamic timeline scale
+  const timelineScale = Math.max(totalDuration, endSeconds, 60);
 
   // Sync initial end time when media changes
   useEffect(() => {
-    const dur = media.duration && media.duration > 0 ? media.duration : 180;
+    const dur = media.duration && media.duration > 0 ? media.duration : 600;
     setStartSeconds(0);
     setEndSeconds(dur);
     setTrimStartText('00:00');
@@ -76,30 +80,36 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
   };
 
   const handleAdjustEnd = (delta: number) => {
-    const next = Math.max(startSeconds + 1, Math.min(totalDuration, endSeconds + delta));
+    const target = endSeconds + delta;
+    const next = totalDuration > 0
+      ? Math.max(startSeconds + 1, Math.min(totalDuration, target))
+      : Math.max(startSeconds + 1, target);
     setEndSeconds(next);
     setTrimEndText(secondsToTimeString(next));
   };
 
   const handleStartTextBlur = () => {
     const parsed = parseTimeToSeconds(trimStartText);
-    const clamped = Math.max(0, Math.min(endSeconds - 1, parsed));
+    const maxStart = endSeconds > 0 ? endSeconds - 1 : 0;
+    const clamped = Math.max(0, Math.min(maxStart, parsed));
     setStartSeconds(clamped);
     setTrimStartText(secondsToTimeString(clamped));
   };
 
   const handleEndTextBlur = () => {
     const parsed = parseTimeToSeconds(trimEndText);
-    const clamped = Math.max(startSeconds + 1, Math.min(totalDuration, parsed));
+    const clamped = totalDuration > 0
+      ? Math.max(startSeconds + 1, Math.min(totalDuration, parsed))
+      : Math.max(startSeconds + 1, parsed);
     setEndSeconds(clamped);
     setTrimEndText(secondsToTimeString(clamped));
   };
 
   const handleResetTrim = () => {
     setStartSeconds(0);
-    setEndSeconds(totalDuration);
+    setEndSeconds(defaultEndSec);
     setTrimStartText('00:00');
-    setTrimEndText(secondsToTimeString(totalDuration));
+    setTrimEndText(secondsToTimeString(defaultEndSec));
   };
 
   const clipDurationSec = Math.max(0, endSeconds - startSeconds);
@@ -392,7 +402,8 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
                   <div className="flex justify-between text-[11px] text-gray-400 font-mono">
                     <span>Start: {trimStartText}</span>
                     <span className="text-indigo-300 font-semibold">
-                      Clip: {secondsToTimeString(clipDurationSec)} ({Math.round((clipDurationSec / totalDuration) * 100)}%)
+                      Clip: {secondsToTimeString(clipDurationSec)}
+                      {totalDuration > 0 ? ` (${Math.round((clipDurationSec / totalDuration) * 100)}%)` : ''}
                     </span>
                     <span>End: {trimEndText}</span>
                   </div>
@@ -402,8 +413,8 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
                     <div
                       className="absolute top-0 bottom-0 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full opacity-80"
                       style={{
-                        left: `${(startSeconds / totalDuration) * 100}%`,
-                        width: `${Math.max(2, ((endSeconds - startSeconds) / totalDuration) * 100)}%`,
+                        left: `${Math.min(100, (startSeconds / timelineScale) * 100)}%`,
+                        width: `${Math.max(2, Math.min(100, ((endSeconds - startSeconds) / timelineScale) * 100))}%`,
                       }}
                     />
                   </div>
@@ -459,7 +470,7 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
                         value={trimEndText}
                         onChange={(e) => setTrimEndText(e.target.value)}
                         onBlur={handleEndTextBlur}
-                        placeholder="03:00"
+                        placeholder="00:00"
                         className="w-24 px-2.5 py-1.5 rounded-lg bg-black/80 border border-indigo-500/40 text-white font-mono text-center text-xs focus:outline-none focus:border-indigo-400 transition-all"
                       />
                       <div className="flex items-center gap-1">
