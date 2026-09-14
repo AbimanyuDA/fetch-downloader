@@ -43,94 +43,88 @@ export async function GET(req: NextRequest) {
       ffmpegAvailable = false;
     }
 
-    if (!ffmpegAvailable) {
-      // ffmpeg not installed (e.g., Vercel serverless) — tell client to handle trim
-      return new NextResponse(
-        JSON.stringify({ error: 'ffmpeg_unavailable', message: 'Server-side trimming is not available in this environment. Client-side trimming will be used.' }),
-        { status: 503, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
+    if (ffmpegAvailable) {
+      try {
+        const duration = endSec - startSec;
+        const ffmpegArgs: string[] = [
+          '-headers',
+          'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36\r\n',
+          '-ss',
+          startSec.toString(),
+          '-t',
+          duration.toString(),
+          '-i',
+          targetUrl,
+        ];
+        let contentType = 'application/octet-stream';
 
-    try {
-      const duration = endSec - startSec;
-      const ffmpegArgs: string[] = [
-        '-headers',
-        'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36\r\n',
-        '-ss',
-        startSec.toString(),
-        '-t',
-        duration.toString(),
-        '-i',
-        targetUrl,
-      ];
-      let contentType = 'application/octet-stream';
+        if (ext === 'mp3') {
+          ffmpegArgs.push('-vn', '-c:a', 'libmp3lame', '-b:a', '320k', '-f', 'mp3', 'pipe:1');
+          contentType = 'audio/mpeg';
+        } else if (ext === 'wav') {
+          ffmpegArgs.push('-vn', '-c:a', 'pcm_s16le', '-f', 'wav', 'pipe:1');
+          contentType = 'audio/wav';
+        } else if (ext === 'flac') {
+          ffmpegArgs.push('-vn', '-c:a', 'flac', '-f', 'flac', 'pipe:1');
+          contentType = 'audio/flac';
+        } else if (ext === 'm4a' || ext === 'aac') {
+          ffmpegArgs.push('-vn', '-c:a', 'aac', '-b:a', '256k', '-f', 'adts', 'pipe:1');
+          contentType = 'audio/aac';
+        } else if (ext === 'webm') {
+          ffmpegArgs.push('-c:v', 'copy', '-c:a', 'copy', '-f', 'webm', 'pipe:1');
+          contentType = 'video/webm';
+        } else {
+          ffmpegArgs.push('-c', 'copy', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1');
+          contentType = 'video/mp4';
+        }
 
-      if (ext === 'mp3') {
-        ffmpegArgs.push('-vn', '-c:a', 'libmp3lame', '-b:a', '320k', '-f', 'mp3', 'pipe:1');
-        contentType = 'audio/mpeg';
-      } else if (ext === 'wav') {
-        ffmpegArgs.push('-vn', '-c:a', 'pcm_s16le', '-f', 'wav', 'pipe:1');
-        contentType = 'audio/wav';
-      } else if (ext === 'flac') {
-        ffmpegArgs.push('-vn', '-c:a', 'flac', '-f', 'flac', 'pipe:1');
-        contentType = 'audio/flac';
-      } else if (ext === 'm4a' || ext === 'aac') {
-        ffmpegArgs.push('-vn', '-c:a', 'aac', '-b:a', '256k', '-f', 'adts', 'pipe:1');
-        contentType = 'audio/aac';
-      } else if (ext === 'webm') {
-        ffmpegArgs.push('-c:v', 'copy', '-c:a', 'copy', '-f', 'webm', 'pipe:1');
-        contentType = 'video/webm';
-      } else {
-        // MP4 video
-        ffmpegArgs.push('-c', 'copy', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1');
-        contentType = 'video/mp4';
+        const ff = spawn('ffmpeg', ffmpegArgs);
+
+        let stderrOutput = '';
+        ff.stderr.on('data', (chunk) => {
+          stderrOutput += chunk.toString();
+        });
+
+        const stream = new ReadableStream({
+          start(controller) {
+            ff.stdout.on('data', (chunk) => controller.enqueue(chunk));
+            ff.stdout.on('end', () => {
+              try { controller.close(); } catch {}
+            });
+            ff.stdout.on('error', (err) => {
+              try { controller.error(err); } catch {}
+            });
+            ff.on('error', (err) => {
+              console.error('FFmpeg spawn error:', err.message);
+              try { controller.error(err); } catch {}
+            });
+            ff.on('close', (code) => {
+              if (code !== 0) {
+                console.error(`FFmpeg exited with code ${code}. stderr: ${stderrOutput.slice(-500)}`);
+              }
+            });
+          },
+          cancel() {
+            ff.kill();
+          },
+        });
+
+        const headers = new Headers();
+        headers.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+        headers.set('Content-Type', contentType);
+        headers.set('Access-Control-Allow-Origin', '*');
+        headers.set('Cache-Control', 'no-cache');
+
+        return new NextResponse(stream as any, {
+          status: 200,
+          headers,
+        });
+      } catch (trimErr: any) {
+        console.warn('FFmpeg trim error, falling back to full stream:', trimErr);
       }
-
-      const ff = spawn('ffmpeg', ffmpegArgs);
-
-      // Collect stderr for error diagnostics
-      let stderrOutput = '';
-      ff.stderr.on('data', (chunk) => {
-        stderrOutput += chunk.toString();
-      });
-
-      const stream = new ReadableStream({
-        start(controller) {
-          ff.stdout.on('data', (chunk) => controller.enqueue(chunk));
-          ff.stdout.on('end', () => {
-            try { controller.close(); } catch {}
-          });
-          ff.stdout.on('error', (err) => {
-            try { controller.error(err); } catch {}
-          });
-          ff.on('error', (err) => {
-            console.error('FFmpeg spawn error:', err.message);
-            try { controller.error(err); } catch {}
-          });
-          ff.on('close', (code) => {
-            if (code !== 0) {
-              console.error(`FFmpeg exited with code ${code}. stderr: ${stderrOutput.slice(-500)}`);
-            }
-          });
-        },
-        cancel() {
-          ff.kill();
-        },
-      });
-
-      const headers = new Headers();
-      headers.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
-      headers.set('Content-Type', contentType);
-      headers.set('Access-Control-Allow-Origin', '*');
-      headers.set('Cache-Control', 'no-cache');
-
-      return new NextResponse(stream as any, {
-        status: 200,
-        headers,
-      });
-    } catch (trimErr: any) {
-      console.warn('FFmpeg trim error, falling back to full stream:', trimErr);
-      // Fall through to standard direct download below
+    } else {
+      // ffmpeg not installed — skip trim, fall through to direct download
+      console.warn('ffmpeg not available on this server. Streaming full file without trimming.');
     }
   }
 
