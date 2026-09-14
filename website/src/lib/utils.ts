@@ -66,7 +66,11 @@ export function detectPlatform(url: string): { platform: MediaPlatform; platform
   }
 }
 
-export function triggerBrowserDownload(downloadUrl: string, filename: string) {
+export function triggerBrowserDownload(
+  downloadUrl: string,
+  filename: string,
+  trimParams?: { trimStart?: number; trimEnd?: number }
+) {
   if (typeof window === 'undefined') return;
 
   // Blob or data URLs
@@ -83,7 +87,15 @@ export function triggerBrowserDownload(downloadUrl: string, filename: string) {
   }
 
   // Stream directly through download endpoint with Content-Disposition: attachment
-  const secureEndpoint = `/api/download/file?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}`;
+  let secureEndpoint = `/api/download/file?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}`;
+  if (
+    trimParams &&
+    typeof trimParams.trimStart === 'number' &&
+    typeof trimParams.trimEnd === 'number' &&
+    trimParams.trimEnd > trimParams.trimStart
+  ) {
+    secureEndpoint += `&trimStart=${trimParams.trimStart}&trimEnd=${trimParams.trimEnd}`;
+  }
   
   const iframe = document.createElement('iframe');
   iframe.style.display = 'none';

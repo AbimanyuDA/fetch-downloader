@@ -138,7 +138,7 @@ export async function extractYouTube(url: string): Promise<MediaInfo> {
           }
         }
 
-        // Adaptive high quality formats (1080p, 1440p)
+        // Adaptive high quality formats (1080p, 1440p, 4K)
         if (Array.isArray(data.adaptiveFormats)) {
           for (const s of data.adaptiveFormats) {
             if (s.container === 'mp4' && s.type?.includes('video')) {
@@ -160,23 +160,6 @@ export async function extractYouTube(url: string): Promise<MediaInfo> {
                 }
               }
             }
-
-            // Audio format
-            if (s.type?.includes('audio') && (s.container === 'm4a' || s.container === 'mp4')) {
-              if (!formats.some(f => f.type === 'audio')) {
-                formats.push({
-                  id: 'audio-m4a-hq',
-                  label: 'HQ Audio (M4A / AAC)',
-                  type: 'audio',
-                  quality: s.audioQuality || 'High Bitrate',
-                  extension: 'm4a',
-                  filesize: s.size ? Number(s.size) : undefined,
-                  filesizeFormatted: s.size ? formatBytes(Number(s.size)) : undefined,
-                  url: s.url,
-                  isDirect: true,
-                });
-              }
-            }
           }
         }
 
@@ -189,39 +172,82 @@ export async function extractYouTube(url: string): Promise<MediaInfo> {
     }
   }
 
-  // Fallback formats if instances are blocked or slow
-  if (formats.length === 0) {
-    formats.push(
-      {
-        id: 'yt-1080p',
-        label: 'Full HD (1080p MP4)',
+  // Ensure standard video formats exist
+  const standardVideoResolutions = [
+    { res: '1080p', label: 'Full HD (1080p MP4)' },
+    { res: '720p', label: 'HD (720p MP4)' },
+    { res: '480p', label: 'SD (480p MP4)' },
+    { res: '360p', label: 'Mobile (360p MP4)' },
+  ];
+
+  for (const item of standardVideoResolutions) {
+    if (!formats.some((f) => f.type === 'video' && f.resolution === item.res)) {
+      formats.push({
+        id: `yt-${item.res}`,
+        label: item.label,
         type: 'video',
-        resolution: '1080p',
-        quality: '1080p',
+        resolution: item.res,
+        quality: item.res,
         extension: 'mp4',
         url: `https://www.youtube.com/watch?v=${id}`,
         isDirect: false,
-      },
-      {
-        id: 'yt-720p',
-        label: 'HD (720p MP4)',
-        type: 'video',
-        resolution: '720p',
-        quality: '720p',
-        extension: 'mp4',
-        url: `https://www.youtube.com/watch?v=${id}`,
-        isDirect: false,
-      },
-      {
-        id: 'yt-audio',
-        label: 'Audio Only (MP3 320kbps)',
-        type: 'audio',
-        quality: '320kbps',
-        extension: 'mp3',
-        url: `https://www.youtube.com/watch?v=${id}`,
-        isDirect: false,
-      }
-    );
+      });
+    }
+  }
+
+  // Sort video formats by resolution descending
+  formats.sort((a, b) => {
+    if (a.type !== 'video' || b.type !== 'video') return 0;
+    const aRes = parseInt(a.resolution || '0', 10);
+    const bRes = parseInt(b.resolution || '0', 10);
+    return bRes - aRes;
+  });
+
+  // Always provide accurate, complete audio format options
+  const audioOptions: MediaFormat[] = [
+    {
+      id: 'audio-mp3-320',
+      label: 'MP3 Audio (320 kbps HQ)',
+      type: 'audio',
+      quality: '320 kbps',
+      extension: 'mp3',
+      url: `https://www.youtube.com/watch?v=${id}`,
+      isDirect: false,
+    },
+    {
+      id: 'audio-wav-lossless',
+      label: 'WAV Audio (Lossless PCM / Studio)',
+      type: 'audio',
+      quality: 'Lossless 16-bit',
+      extension: 'wav',
+      url: `https://www.youtube.com/watch?v=${id}`,
+      isDirect: false,
+    },
+    {
+      id: 'audio-m4a-hq',
+      label: 'M4A / AAC Audio (256 kbps HQ)',
+      type: 'audio',
+      quality: '256 kbps AAC',
+      extension: 'm4a',
+      url: `https://www.youtube.com/watch?v=${id}`,
+      isDirect: false,
+    },
+    {
+      id: 'audio-flac-hifi',
+      label: 'FLAC Audio (Lossless Hi-Fi)',
+      type: 'audio',
+      quality: 'Lossless Hi-Fi',
+      extension: 'flac',
+      url: `https://www.youtube.com/watch?v=${id}`,
+      isDirect: false,
+    },
+  ];
+
+  // Append audio formats
+  for (const audio of audioOptions) {
+    if (!formats.some((f) => f.type === 'audio' && f.extension === audio.extension)) {
+      formats.push(audio);
+    }
   }
 
   return {

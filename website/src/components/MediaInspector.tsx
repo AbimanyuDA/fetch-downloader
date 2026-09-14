@@ -131,24 +131,15 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
         finalDownloadUrl = format.url;
       } else {
         // Step 1: Initialize serverless conversion task
-        // For YouTube: pass trim range so server (loader.to) handles trimming natively
-        setDownloadStatusText(enableTrim
-          ? `Preparing trimmed stream (${trimStartText} to ${trimEndText})...`
-          : 'Preparing high-speed media stream...');
+        setDownloadStatusText(`Preparing high-speed ${format.label} stream...`);
 
         const downloadPayload: Record<string, unknown> = {
           action: 'init',
           url: media.url,
-          resolution: format.resolution || (format.type === 'audio' ? 'mp3' : '720p'),
-          format: format.type === 'audio' ? 'mp3' : (format.resolution || '720'),
+          resolution: format.resolution,
+          format: format.type === 'audio' ? format.extension : (format.resolution || '720'),
           extension: format.extension,
         };
-
-        // Pass trim seconds to API for YouTube server-side trimming
-        if (enableTrim && media.platform === 'youtube') {
-          downloadPayload.trimStartSec = startSec;
-          downloadPayload.trimEndSec = endSec;
-        }
 
         const initRes = await fetch('/api/download', {
           method: 'POST',
@@ -216,115 +207,35 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
         throw new Error('Stream URL is not direct. Please choose another format option.');
       }
 
-      // Step 3: Handle Trim Range
-      // For YouTube: server already trimmed via loader.to, just download the result
-      // For non-YouTube direct streams: use browser-side trim
-      if (enableTrim && media.platform !== 'youtube') {
-        setDownloadProgress(95);
-
-        if (format.type === 'audio') {
-          setDownloadStatusText(`Trimming audio (${trimStartText} to ${trimEndText})...`);
-          const trimmedBlob = await trimAudioFromUrl(finalDownloadUrl, startSec, endSec, (msg) => {
-            setDownloadStatusText(msg);
-          });
-
-          const blobUrl = URL.createObjectURL(trimmedBlob);
-          const safeTrimFilename = `${filename}_trimmed_${trimStartText.replace(/:/g, '-')}_to_${trimEndText.replace(/:/g, '-')}.wav`;
-
-          triggerBrowserDownload(blobUrl, safeTrimFilename);
-
-          setDownloadProgress(100);
-          setDownloadSuccess(`Downloaded trimmed audio (${trimStartText} to ${trimEndText})!`);
-          triggerConfetti();
-
-          onDownloaded({
-            id: `${media.url}_${Date.now()}`,
-            title: `${media.title} [Trimmed ${trimStartText}-${trimEndText}]`,
-            author: media.author,
-            thumbnail: media.thumbnail,
-            platform: media.platform,
-            url: media.url,
-            downloadedAt: Date.now(),
-            formatLabel: `Trimmed Audio (${trimStartText}-${trimEndText})`,
-          });
-
-          setTimeout(() => {
-            setDownloadingId(null);
-            setDownloadProgress(0);
-            setDownloadStatusText('');
-          }, 3500);
-          return;
-        } else {
-          // Video trimming (non-YouTube)
-          setDownloadStatusText(`Trimming video (${trimStartText} to ${trimEndText})...`);
-          try {
-            const { blob: trimmedVideoBlob, extension: vidExt } = await trimVideoFromUrl(
-              finalDownloadUrl,
-              startSec,
-              endSec,
-              (msg) => setDownloadStatusText(msg)
-            );
-
-            const blobUrl = URL.createObjectURL(trimmedVideoBlob);
-            const safeTrimFilename = `${filename}_trimmed_${trimStartText.replace(/:/g, '-')}_to_${trimEndText.replace(/:/g, '-')}.${vidExt}`;
-
-            triggerBrowserDownload(blobUrl, safeTrimFilename);
-
-            setDownloadProgress(100);
-            setDownloadSuccess(`Downloaded trimmed video (${trimStartText} to ${trimEndText})!`);
-            triggerConfetti();
-
-            onDownloaded({
-              id: `${media.url}_${Date.now()}`,
-              title: `${media.title} [Trimmed ${trimStartText}-${trimEndText}]`,
-              author: media.author,
-              thumbnail: media.thumbnail,
-              platform: media.platform,
-              url: media.url,
-              downloadedAt: Date.now(),
-              formatLabel: `Trimmed Video (${trimStartText}-${trimEndText})`,
-            });
-
-            setTimeout(() => {
-              setDownloadingId(null);
-              setDownloadProgress(0);
-              setDownloadStatusText('');
-            }, 3500);
-            return;
-          } catch (vidErr: any) {
-            throw new Error(`Video trimming failed: ${vidErr.message || 'Stream format could not be trimmed'}. You can disable "Custom Trim Range" to download the full video, or switch to Audio to trim MP3/WAV.`);
-          }
-        }
-      }
-
-      // Step 4: Download (for YouTube with trim, file is already trimmed server-side)
+      // Step 3: Trigger Browser Download with optional trim parameters
       setDownloadProgress(100);
 
-      const isYouTubeTrimmed = enableTrim && media.platform === 'youtube';
-      const downloadFilename = isYouTubeTrimmed
+      const downloadFilename = enableTrim
         ? `${filename}_trimmed_${trimStartText.replace(/:/g, '-')}_to_${trimEndText.replace(/:/g, '-')}.${format.extension}`
         : `${filename}.${format.extension}`;
 
+      const trimParams = enableTrim ? { trimStart: startSec, trimEnd: endSec } : undefined;
+
       setDownloadStatusText('Starting download to your Mac...');
-      triggerBrowserDownload(finalDownloadUrl, downloadFilename);
+      triggerBrowserDownload(finalDownloadUrl, downloadFilename, trimParams);
 
       setDownloadSuccess(
-        isYouTubeTrimmed
-          ? `Downloaded trimmed ${format.type} (${trimStartText} to ${trimEndText})! Check your Downloads folder.`
+        enableTrim
+          ? `Downloaded trimmed ${format.label} (${trimStartText} to ${trimEndText})! Check your Downloads folder.`
           : `Downloaded ${format.label}! Check your Mac Downloads folder.`
       );
       triggerConfetti();
 
       onDownloaded({
         id: `${media.url}_${Date.now()}`,
-        title: isYouTubeTrimmed ? `${media.title} [${trimStartText}-${trimEndText}]` : media.title,
+        title: enableTrim ? `${media.title} [${trimStartText}-${trimEndText}]` : media.title,
         author: media.author,
         thumbnail: media.thumbnail,
         platform: media.platform,
         url: media.url,
         downloadedAt: Date.now(),
-        formatLabel: isYouTubeTrimmed
-          ? `Trimmed ${format.extension.toUpperCase()} (${trimStartText}-${trimEndText})`
+        formatLabel: enableTrim
+          ? `Trimmed ${format.label} (${trimStartText}-${trimEndText})`
           : `${format.label} (${format.extension.toUpperCase()})`,
       });
 

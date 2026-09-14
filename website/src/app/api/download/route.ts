@@ -5,16 +5,26 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 function getTargetFormat(format?: string, resolution?: string, extension?: string): string {
-  if (extension === 'mp3' || format === 'mp3') return 'mp3';
-  if (extension === 'm4a' || format === 'm4a') return 'm4a';
+  const ext = (extension || '').toLowerCase();
+  const fmt = (format || '').toLowerCase();
+  const res = (resolution || '').toLowerCase();
 
-  const res = resolution || format || '';
-  if (res.includes('1080')) return '1080';
-  if (res.includes('720')) return '720';
-  if (res.includes('480')) return '480';
-  if (res.includes('360')) return '360';
-  if (res.includes('1440')) return '1440';
-  if (res.includes('4k') || res.includes('2160')) return '4k';
+  // Audio formats
+  if (ext === 'mp3' || fmt === 'mp3' || fmt.includes('mp3')) return 'mp3';
+  if (ext === 'wav' || fmt === 'wav' || fmt.includes('wav')) return 'wav';
+  if (ext === 'flac' || fmt === 'flac' || fmt.includes('flac')) return 'flac';
+  if (ext === 'm4a' || fmt === 'm4a' || ext === 'aac' || fmt === 'aac' || fmt.includes('m4a') || fmt.includes('aac')) return 'm4a';
+  if (ext === 'opus' || fmt === 'opus' || fmt.includes('opus')) return 'opus';
+  if (ext === 'ogg' || fmt === 'ogg' || fmt.includes('ogg')) return 'ogg';
+
+  // Video formats & resolutions
+  if (res.includes('4k') || res.includes('2160') || fmt.includes('4k') || fmt.includes('2160')) return '4k';
+  if (res.includes('1440') || fmt.includes('1440')) return '1440';
+  if (res.includes('1080') || fmt.includes('1080')) return '1080';
+  if (res.includes('720') || fmt.includes('720')) return '720';
+  if (res.includes('480') || fmt.includes('480')) return '480';
+  if (res.includes('360') || fmt.includes('360')) return '360';
+  if (ext === 'webm' || fmt === 'webm') return 'webm';
 
   return '720';
 }
