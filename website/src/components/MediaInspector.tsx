@@ -216,8 +216,14 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
 
       const trimParams = enableTrim ? { trimStart: startSec, trimEnd: endSec } : undefined;
 
-      setDownloadStatusText('Starting download to your Mac...');
-      triggerBrowserDownload(finalDownloadUrl, downloadFilename, trimParams);
+      setDownloadStatusText(enableTrim ? `Processing & downloading trimmed file (${trimStartText} to ${trimEndText})...` : 'Downloading to your Mac...');
+      setDownloadProgress(95);
+
+      await triggerBrowserDownload(finalDownloadUrl, downloadFilename, trimParams, (status) => {
+        setDownloadStatusText(status);
+      });
+
+      setDownloadProgress(100);
 
       setDownloadSuccess(
         enableTrim

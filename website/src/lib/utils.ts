@@ -66,11 +66,12 @@ export function detectPlatform(url: string): { platform: MediaPlatform; platform
   }
 }
 
-export function triggerBrowserDownload(
+export async function triggerBrowserDownload(
   downloadUrl: string,
   filename: string,
-  trimParams?: { trimStart?: number; trimEnd?: number }
-) {
+  trimParams?: { trimStart?: number; trimEnd?: number },
+  onStatusUpdate?: (status: string) => void
+): Promise<void> {
   if (typeof window === 'undefined') return;
 
   // Blob or data URLs
@@ -95,6 +96,32 @@ export function triggerBrowserDownload(
     trimParams.trimEnd > trimParams.trimStart
   ) {
     secureEndpoint += `&trimStart=${trimParams.trimStart}&trimEnd=${trimParams.trimEnd}`;
+  }
+
+  // If trimmed or audio, fetch blob so user sees exact progress and success only when file is ready
+  const isTrimmedOrAudio = !!trimParams || /\.(mp3|wav|m4a|flac|aac)$/i.test(filename);
+  if (isTrimmedOrAudio) {
+    if (onStatusUpdate) {
+      onStatusUpdate('Downloading and saving file to your Mac...');
+    }
+
+    const res = await fetch(secureEndpoint);
+    if (!res.ok) {
+      throw new Error(`Download stream failed (HTTP ${res.status})`);
+    }
+
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(blobUrl);
+    }, 5000);
+    return;
   }
   
   const iframe = document.createElement('iframe');

@@ -34,7 +34,17 @@ export async function GET(req: NextRequest) {
   // Trim mode using ffmpeg
   if (hasTrim) {
     try {
-      const ffmpegArgs: string[] = ['-ss', startSec.toString(), '-to', endSec.toString(), '-i', targetUrl];
+      const duration = endSec - startSec;
+      const ffmpegArgs: string[] = [
+        '-headers',
+        'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36\r\n',
+        '-ss',
+        startSec.toString(),
+        '-t',
+        duration.toString(),
+        '-i',
+        targetUrl,
+      ];
       let contentType = 'application/octet-stream';
 
       if (ext === 'mp3') {
