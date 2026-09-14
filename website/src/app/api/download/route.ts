@@ -22,7 +22,7 @@ function getTargetFormat(format?: string, resolution?: string, extension?: strin
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { action, url, progressUrl, format, resolution, extension } = body;
+    const { action, url, progressUrl, format, resolution, extension, trimStartSec, trimEndSec } = body;
 
     // Action 1: Poll progress of an existing conversion job
     if (action === 'progress') {
@@ -61,7 +61,12 @@ export async function POST(req: NextRequest) {
     const ytId = extractYouTubeId(url);
     if (ytId) {
       const targetFmt = getTargetFormat(format, resolution, extension);
-      const initUrl = `https://loader.to/ajax/download.php?button=1&start=1&end=1&format=${targetFmt}&url=${encodeURIComponent(url)}`;
+
+      // Use trim range if provided, otherwise download full (start=1&end=1 means full)
+      const startParam = (typeof trimStartSec === 'number' && trimStartSec > 0) ? trimStartSec : 1;
+      const endParam = (typeof trimEndSec === 'number' && trimEndSec > 0) ? trimEndSec : 1;
+
+      const initUrl = `https://loader.to/ajax/download.php?button=1&start=${startParam}&end=${endParam}&format=${targetFmt}&url=${encodeURIComponent(url)}`;
 
       const initRes = await fetch(initUrl, {
         headers: {
