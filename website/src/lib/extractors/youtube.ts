@@ -2,8 +2,40 @@ import { MediaInfo, MediaFormat } from '../types';
 import { formatBytes, formatDuration } from '../utils';
 
 export function extractYouTubeId(url: string): string | null {
-  const regExp = /(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?|shorts)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
-  const match = url.match(regExp);
+  try {
+    const parsed = new URL(url.trim());
+
+    // 1. Check standard ?v= param
+    const vParam = parsed.searchParams.get('v');
+    if (vParam && /^[a-zA-Z0-9_-]{11}$/.test(vParam)) {
+      return vParam;
+    }
+
+    // 2. Check path segments (youtu.be/ID, /live/ID, /shorts/ID, /embed/ID, /v/ID)
+    const pathParts = parsed.pathname.split('/').filter(Boolean);
+
+    if (parsed.hostname.includes('youtu.be') && pathParts[0]) {
+      const idCandidate = pathParts[0].slice(0, 11);
+      if (/^[a-zA-Z0-9_-]{11}$/.test(idCandidate)) {
+        return idCandidate;
+      }
+    }
+
+    const triggerSegments = ['shorts', 'live', 'embed', 'v'];
+    for (let i = 0; i < pathParts.length; i++) {
+      if (triggerSegments.includes(pathParts[i]) && pathParts[i + 1]) {
+        const potentialId = pathParts[i + 1].slice(0, 11);
+        if (/^[a-zA-Z0-9_-]{11}$/.test(potentialId)) {
+          return potentialId;
+        }
+      }
+    }
+  } catch (e) {
+    // If URL parsing fails, continue to regex fallback
+  }
+
+  // Fallback regex covering watch, v, embed, shorts, live, youtu.be
+  const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|live\/|watch\?v=|watch\?.+&v=))([a-zA-Z0-9_-]{11})/);
   return match ? match[1] : null;
 }
 
@@ -18,14 +50,14 @@ const INVIDIOUS_INSTANCES = [
 export async function extractYouTube(url: string): Promise<MediaInfo> {
   const id = extractYouTubeId(url);
   if (!id) {
-    throw new Error('Invalid YouTube URL: could not extract Video ID');
+    throw new Error('Invalid YouTube URL: could not extract Video ID. Please ensure the link is a valid YouTube video, shorts, or live stream.');
   }
 
   // 1. Get oEmbed metadata as baseline
   let title = 'YouTube Video';
   let author = 'YouTube Creator';
   let authorUrl = `https://www.youtube.com/watch?v=${id}`;
-  const thumbnail = `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`;
+  let thumbnail = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
 
   try {
     const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`, {
@@ -36,6 +68,7 @@ export async function extractYouTube(url: string): Promise<MediaInfo> {
       if (oembed.title) title = oembed.title;
       if (oembed.author_name) author = oembed.author_name;
       if (oembed.author_url) authorUrl = oembed.author_url;
+      if (oembed.thumbnail_url) thumbnail = oembed.thumbnail_url;
     }
   } catch (err) {
     console.warn('oEmbed fetch error:', err);

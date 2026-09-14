@@ -70,7 +70,7 @@ export default function HistoryList({
                   <span className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 uppercase font-medium">
                     {item.platform}
                   </span>
-                  <span className="text-[10px] text-gray-500 font-mono">
+                  <span suppressHydrationWarning className="text-[10px] text-gray-500 font-mono">
                     {new Date(item.downloadedAt).toLocaleDateString()}
                   </span>
                 </div>

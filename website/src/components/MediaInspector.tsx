@@ -9,14 +9,13 @@ import {
   ExternalLink,
   CheckCircle2,
   Clock,
-  Sparkles,
-  Play,
-  FileCheck,
-  Share2,
+  AlertCircle,
+  Loader2,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { MediaInfo, MediaFormat, HistoryItem } from '@/lib/types';
 import { sanitizeFilename } from '@/lib/utils';
+import { parseTimeToSeconds, trimAudioFromUrl, trimVideoFromUrl } from '@/lib/mediaTrimmer';
 
 interface MediaInspectorProps {
   media: MediaInfo;
@@ -27,12 +26,14 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
   const [activeTab, setActiveTab] = useState<'video' | 'audio'>('video');
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
+  const [downloadStatusText, setDownloadStatusText] = useState<string>('');
   const [downloadSuccess, setDownloadSuccess] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
-  // Trim range states (matching macOS MediaFetch desktop trim feature)
+  // Trim range states
   const [enableTrim, setEnableTrim] = useState<boolean>(false);
   const [trimStart, setTrimStart] = useState<string>('00:00');
-  const [trimEnd, setTrimEnd] = useState<string>(media.durationFormatted || '00:00');
+  const [trimEnd, setTrimEnd] = useState<string>(media.durationFormatted && media.durationFormatted !== 'Video' ? media.durationFormatted : '01:00');
 
   const videoFormats = media.formats.filter((f) => f.type === 'video');
   const audioFormats = media.formats.filter((f) => f.type === 'audio');
@@ -50,47 +51,212 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
 
   const handleDownload = async (format: MediaFormat) => {
     setDownloadingId(format.id);
-    setDownloadProgress(10);
+    setDownloadProgress(5);
+    setDownloadStatusText('Starting conversion...');
     setDownloadSuccess(null);
-
-    // Smooth simulated progress indicator for user feedback
-    const interval = setInterval(() => {
-      setDownloadProgress((prev) => {
-        if (prev >= 90) {
-          clearInterval(interval);
-          return 90;
-        }
-        return prev + 25;
-      });
-    }, 150);
+    setDownloadError(null);
 
     try {
       const filename = `${sanitizeFilename(media.title)}_${format.resolution || format.quality || 'media'}`;
-      let downloadUrl = '';
+      let finalDownloadUrl = '';
 
-      if (format.isDirect && format.url.startsWith('http')) {
-        // Stream directly through download API route with proper attachment header
-        downloadUrl = `/api/download?url=${encodeURIComponent(format.url)}&filename=${encodeURIComponent(filename)}&ext=${format.extension}`;
-      } else {
-        // Fallback or external link
-        downloadUrl = format.url;
+      // Validate trim bounds if enabled
+      let startSec = 0;
+      let endSec = 0;
+      if (enableTrim) {
+        startSec = parseTimeToSeconds(trimStart);
+        endSec = parseTimeToSeconds(trimEnd);
+        if (endSec <= startSec) {
+          throw new Error('End Time must be greater than Start Time.');
+        }
       }
 
-      // Trigger browser download via invisible link
+      // If direct stream URL is already known and doesn't require backend job
+      if (format.isDirect && format.url.startsWith('http') && media.platform !== 'youtube') {
+        finalDownloadUrl = format.url;
+      } else {
+        // Step 1: Initialize serverless conversion task
+        setDownloadStatusText('Connecting to stream engine...');
+        const initRes = await fetch('/api/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'init',
+            url: media.url,
+            resolution: format.resolution || (format.type === 'audio' ? 'mp3' : '720p'),
+            format: format.type === 'audio' ? 'mp3' : (format.resolution || '720'),
+            extension: format.extension,
+          }),
+        });
+
+        const initJson = await initRes.json();
+        if (!initJson.success) {
+          throw new Error(initJson.error || 'Could not start conversion. Please try another quality.');
+        }
+
+        if (initJson.downloadUrl) {
+          finalDownloadUrl = initJson.downloadUrl;
+        } else if (initJson.progressUrl) {
+          // Step 2: Poll progress without blocking Vercel serverless execution
+          let resolved = false;
+          let attempts = 0;
+          const maxAttempts = 75; // Up to ~2 minutes for very long live stream recordings
+
+          while (!resolved && attempts < maxAttempts) {
+            attempts++;
+            await new Promise((r) => setTimeout(r, 1500));
+
+            try {
+              const pollRes = await fetch('/api/download', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  action: 'progress',
+                  progressUrl: initJson.progressUrl,
+                }),
+              });
+
+              if (pollRes.ok) {
+                const pollJson = await pollRes.json();
+                if (pollJson.success) {
+                  if (typeof pollJson.progress === 'number' && pollJson.progress > 0) {
+                    setDownloadProgress(Math.min(95, pollJson.progress));
+                  }
+                  if (pollJson.text) {
+                    setDownloadStatusText(`${pollJson.text} (${pollJson.progress || 0}%)`);
+                  }
+
+                  if (pollJson.finished && pollJson.downloadUrl) {
+                    finalDownloadUrl = pollJson.downloadUrl;
+                    resolved = true;
+                    break;
+                  }
+                }
+              }
+            } catch (pollErr) {
+              // Retry on next cycle
+            }
+          }
+
+          if (!resolved || !finalDownloadUrl) {
+            throw new Error('Conversion is taking longer than expected. Please try again or select a different resolution.');
+          }
+        }
+      }
+
+      // Step 3: Handle Trim Range if enabled
+      if (enableTrim) {
+        setDownloadProgress(95);
+
+        if (format.type === 'audio') {
+          setDownloadStatusText(`Trimming audio (${trimStart} to ${trimEnd})...`);
+          const trimmedBlob = await trimAudioFromUrl(finalDownloadUrl, startSec, endSec, (msg) => {
+            setDownloadStatusText(msg);
+          });
+
+          const blobUrl = URL.createObjectURL(trimmedBlob);
+          const safeTrimFilename = `${filename}_trimmed_${trimStart.replace(':', '-')}_to_${trimEnd.replace(':', '-')}.wav`;
+
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = safeTrimFilename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(blobUrl);
+          }, 1500);
+
+          setDownloadProgress(100);
+          setDownloadSuccess(`Downloaded trimmed audio (${trimStart} to ${trimEnd})!`);
+          triggerConfetti();
+
+          onDownloaded({
+            id: `${media.url}_${Date.now()}`,
+            title: `${media.title} [Trimmed ${trimStart}-${trimEnd}]`,
+            author: media.author,
+            thumbnail: media.thumbnail,
+            platform: media.platform,
+            url: media.url,
+            downloadedAt: Date.now(),
+            formatLabel: `Trimmed Audio (${trimStart}-${trimEnd})`,
+          });
+
+          setTimeout(() => {
+            setDownloadingId(null);
+            setDownloadProgress(0);
+            setDownloadStatusText('');
+          }, 3000);
+          return;
+        } else {
+          // Video trimming
+          setDownloadStatusText(`Trimming video (${trimStart} to ${trimEnd})...`);
+          try {
+            const { blob: trimmedVideoBlob, extension: vidExt } = await trimVideoFromUrl(
+              finalDownloadUrl,
+              startSec,
+              endSec,
+              (msg) => setDownloadStatusText(msg)
+            );
+
+            const blobUrl = URL.createObjectURL(trimmedVideoBlob);
+            const safeTrimFilename = `${filename}_trimmed_${trimStart.replace(':', '-')}_to_${trimEnd.replace(':', '-')}.${vidExt}`;
+
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = safeTrimFilename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+              document.body.removeChild(a);
+              URL.revokeObjectURL(blobUrl);
+            }, 1500);
+
+            setDownloadProgress(100);
+            setDownloadSuccess(`Downloaded trimmed video (${trimStart} to ${trimEnd})!`);
+            triggerConfetti();
+
+            onDownloaded({
+              id: `${media.url}_${Date.now()}`,
+              title: `${media.title} [Trimmed ${trimStart}-${trimEnd}]`,
+              author: media.author,
+              thumbnail: media.thumbnail,
+              platform: media.platform,
+              url: media.url,
+              downloadedAt: Date.now(),
+              formatLabel: `Trimmed ${vidExt.toUpperCase()} (${trimStart}-${trimEnd})`,
+            });
+
+            setTimeout(() => {
+              setDownloadingId(null);
+              setDownloadProgress(0);
+              setDownloadStatusText('');
+            }, 3000);
+            return;
+          } catch (vidErr: any) {
+            console.warn('Video trim fallback to full download:', vidErr);
+          }
+        }
+      }
+
+      // Step 4: Standard Full Download
+      setDownloadProgress(100);
+      setDownloadStatusText('Download ready! Starting transfer...');
+
       const a = document.createElement('a');
-      a.href = downloadUrl;
-      a.download = `${filename}.${format.extension}`;
-      a.target = '_blank';
+      a.href = finalDownloadUrl;
+      a.setAttribute('download', `${filename}.${format.extension}`);
+      a.setAttribute('target', '_blank');
+      a.rel = 'noopener noreferrer';
       document.body.appendChild(a);
       a.click();
-      document.body.removeChild(a);
+      setTimeout(() => {
+        document.body.removeChild(a);
+      }, 500);
 
-      clearInterval(interval);
-      setDownloadProgress(100);
       setDownloadSuccess(`Downloaded ${format.label}!`);
       triggerConfetti();
 
-      // Save to download history
       onDownloaded({
         id: `${media.url}_${Date.now()}`,
         title: media.title,
@@ -105,12 +271,13 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
       setTimeout(() => {
         setDownloadingId(null);
         setDownloadProgress(0);
-      }, 2500);
-    } catch (err) {
-      clearInterval(interval);
+        setDownloadStatusText('');
+      }, 3000);
+    } catch (err: any) {
       setDownloadingId(null);
       setDownloadProgress(0);
-      alert('Could not start download. Please try another quality.');
+      setDownloadStatusText('');
+      setDownloadError(err.message || 'Could not complete download. Please try another quality or format.');
     }
   };
 
@@ -173,14 +340,18 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
             </div>
           </div>
 
-          {/* Trim Range Simulator (Matching macOS desktop feature) */}
-          <div className="mt-4 p-3 rounded-2xl bg-white/[0.03] border border-white/5">
+          {/* Trim Range Simulator */}
+          <div className={`mt-4 p-3.5 rounded-2xl border transition-all ${
+            enableTrim ? 'bg-indigo-500/10 border-indigo-500/30 shadow-lg shadow-indigo-500/10' : 'bg-white/[0.03] border-white/5'
+          }`}>
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-medium text-gray-300">
-                <Scissors className="w-3.5 h-3.5 text-indigo-400" />
+              <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
+                <Scissors className={`w-4 h-4 ${enableTrim ? 'text-indigo-400' : 'text-gray-400'}`} />
                 <span>Custom Trim Range</span>
-                <span className="text-[10px] text-indigo-400/80 bg-indigo-500/10 px-1.5 py-0.5 rounded">
-                  Desktop Feature
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                  enableTrim ? 'bg-indigo-500 text-white' : 'bg-white/10 text-gray-400'
+                }`}>
+                  {enableTrim ? 'Active' : 'Disabled'}
                 </span>
               </div>
               <label className="relative inline-flex items-center cursor-pointer">
@@ -190,31 +361,35 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
                   onChange={(e) => setEnableTrim(e.target.checked)}
                   className="sr-only peer"
                 />
-                <div className="w-8 h-4.5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-indigo-600"></div>
+                <div className="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
               </label>
             </div>
 
             {enableTrim && (
-              <div className="mt-3 grid grid-cols-2 gap-3 text-xs animate-fadeIn">
+              <div className="mt-3.5 pt-3 border-t border-white/10 grid grid-cols-2 gap-3 text-xs animate-fadeIn">
                 <div>
-                  <label className="text-gray-400 block mb-1">Start Time</label>
+                  <label className="text-gray-300 font-medium block mb-1">Start Time (MM:SS)</label>
                   <input
                     type="text"
                     value={trimStart}
                     onChange={(e) => setTrimStart(e.target.value)}
                     placeholder="00:00"
-                    className="w-full px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white font-mono text-xs focus:outline-none focus:border-indigo-500"
+                    className="w-full px-3 py-2 rounded-xl bg-black/60 border border-indigo-500/40 text-white font-mono text-xs focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition-all"
                   />
                 </div>
                 <div>
-                  <label className="text-gray-400 block mb-1">End Time</label>
+                  <label className="text-gray-300 font-medium block mb-1">End Time (MM:SS)</label>
                   <input
                     type="text"
                     value={trimEnd}
                     onChange={(e) => setTrimEnd(e.target.value)}
-                    placeholder="00:00"
-                    className="w-full px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white font-mono text-xs focus:outline-none focus:border-indigo-500"
+                    placeholder="05:00"
+                    className="w-full px-3 py-2 rounded-xl bg-black/60 border border-indigo-500/40 text-white font-mono text-xs focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition-all"
                   />
+                </div>
+                <div className="col-span-2 text-[11px] text-indigo-300/80 flex items-center gap-1.5">
+                  <Scissors className="w-3 h-3 text-indigo-400 shrink-0" />
+                  <span>Only the segment between {trimStart} and {trimEnd} will be cut and downloaded.</span>
                 </div>
               </div>
             )}
@@ -258,7 +433,7 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
           </div>
 
           <span className="text-xs text-gray-500 hidden sm:inline">
-            Direct Serverless CDN Streams
+            {enableTrim ? '✂️ Custom Trim Range Active' : 'Direct Serverless CDN Streams'}
           </span>
         </div>
 
@@ -312,18 +487,18 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
                   <div className="flex items-center gap-2 sm:self-center">
                     <button
                       onClick={() => handleDownload(format)}
-                      disabled={isCurrentDownloading}
+                      disabled={!!downloadingId}
                       className="w-full sm:w-auto flex items-center justify-center gap-2 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-medium text-xs sm:text-sm px-5 py-2.5 rounded-xl shadow-md shadow-indigo-600/20 hover:shadow-indigo-600/40 transition-all cursor-pointer disabled:opacity-50 active:scale-95"
                     >
                       {isCurrentDownloading ? (
                         <>
-                          <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
                           <span>Preparing ({downloadProgress}%)</span>
                         </>
                       ) : (
                         <>
-                          <Download className="w-3.5 h-3.5" />
-                          <span>Download {format.extension.toUpperCase()}</span>
+                          {enableTrim ? <Scissors className="w-3.5 h-3.5 text-indigo-200" /> : <Download className="w-3.5 h-3.5" />}
+                          <span>{enableTrim ? `Download Trimmed (${trimStart}-${trimEnd})` : `Download ${format.extension.toUpperCase()}`}</span>
                         </>
                       )}
                     </button>
@@ -334,11 +509,11 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
           )}
         </div>
 
-        {/* Simulated Progress bar if active */}
+        {/* Progress bar if active */}
         {downloadingId && (
           <div className="mt-4 p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 animate-fadeIn">
             <div className="flex justify-between text-xs text-indigo-300 mb-1.5 font-medium">
-              <span>Streaming file from CDN...</span>
+              <span>{downloadStatusText || 'Preparing stream...'}</span>
               <span>{downloadProgress}%</span>
             </div>
             <div className="w-full h-1.5 bg-black/40 rounded-full overflow-hidden">
@@ -350,11 +525,19 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
           </div>
         )}
 
+        {/* Error notification */}
+        {downloadError && (
+          <div className="mt-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2 animate-fadeIn">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{downloadError}</span>
+          </div>
+        )}
+
         {/* Success toast notification */}
         {downloadSuccess && (
           <div className="mt-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs flex items-center gap-2 animate-fadeIn">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
-            <span>{downloadSuccess} Check your browser Downloads folder.</span>
+            <span>{downloadSuccess} Check your browser Downloads folder!</span>
           </div>
         )}
       </div>
