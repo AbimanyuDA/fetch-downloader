@@ -37,6 +37,35 @@ export default function RootLayout({
       suppressHydrationWarning
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              (function() {
+                try {
+                  var clean = function() {
+                    var els = document.querySelectorAll('[bis_skin_checked]');
+                    for (var i = 0; i < els.length; i++) {
+                      els[i].removeAttribute('bis_skin_checked');
+                    }
+                  };
+                  clean();
+                  var observer = new MutationObserver(function(mutations) {
+                    for (var i = 0; i < mutations.length; i++) {
+                      var target = mutations[i].target;
+                      if (target && target.removeAttribute && target.hasAttribute('bis_skin_checked')) {
+                        target.removeAttribute('bis_skin_checked');
+                      }
+                    }
+                  });
+                  observer.observe(document.documentElement, { attributes: true, subtree: true, attributeFilter: ['bis_skin_checked'] });
+                  window.addEventListener('DOMContentLoaded', clean);
+                } catch (e) {}
+              })();
+            `,
+          }}
+        />
+      </head>
       <body
         suppressHydrationWarning
         className="min-h-full flex flex-col bg-[#090a0f] text-gray-100 selection:bg-indigo-600 selection:text-white"

@@ -111,151 +111,183 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
     setDownloadSuccess(null);
     setDownloadError(null);
 
+    const filename = `${sanitizeFilename(media.title)}_${format.resolution || format.quality || 'media'}`;
+    let finalDownloadUrl = '';
+
+    // Start smooth progress ticker
+    let progressTimer: NodeJS.Timeout | null = null;
+
     try {
-      const filename = `${sanitizeFilename(media.title)}_${format.resolution || format.quality || 'media'}`;
-      let finalDownloadUrl = '';
+      setDownloadProgress(12);
+        setDownloadStatusText(`Connecting to high-speed ${format.label} stream...`);
 
-      // Validate trim bounds if enabled
-      let startSec = startSeconds;
-      let endSec = endSeconds;
-      if (enableTrim) {
-        startSec = parseTimeToSeconds(trimStartText);
-        endSec = parseTimeToSeconds(trimEndText);
-        if (endSec <= startSec) {
-          throw new Error('End Time must be greater than Start Time.');
-        }
-      }
+        progressTimer = setInterval(() => {
+          setDownloadProgress((prev) => {
+            if (prev >= 92) return prev;
+            const diff = 92 - prev;
+            const inc = Math.max(1, Math.round(diff * 0.12));
+            const next = Math.min(92, prev + inc);
 
-      // If direct stream URL is already known and doesn't require backend conversion
-      if (format.isDirect && format.url.startsWith('http') && !format.url.includes('youtube.com')) {
-        finalDownloadUrl = format.url;
-      } else {
-        // Step 1: Initialize serverless conversion task
-        setDownloadStatusText(`Preparing high-speed ${format.label} stream...`);
+            if (next < 30) {
+              setDownloadStatusText('Connecting to media stream...');
+            } else if (next < 60) {
+              setDownloadStatusText(`Converting ${format.label}...`);
+            } else if (next < 85) {
+              setDownloadStatusText('Encoding media stream...');
+            } else {
+              setDownloadStatusText('Finalizing media stream...');
+            }
+            return next;
+          });
+        }, 350);
 
-        const downloadPayload: Record<string, unknown> = {
-          action: 'init',
-          url: media.url,
-          resolution: format.resolution,
-          format: format.type === 'audio' ? format.extension : (format.resolution || '720'),
-          extension: format.extension,
-        };
-
-        const initRes = await fetch('/api/download', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(downloadPayload),
-        });
-
-        const initJson = await initRes.json();
-        if (!initJson.success) {
-          throw new Error(initJson.error || 'Could not initialize download. Please try another quality.');
+        // Validate trim bounds if enabled
+        let startSec = startSeconds;
+        let endSec = endSeconds;
+        if (enableTrim) {
+          startSec = parseTimeToSeconds(trimStartText);
+          endSec = parseTimeToSeconds(trimEndText);
+          if (endSec <= startSec) {
+            throw new Error('End Time must be greater than Start Time.');
+          }
         }
 
-        if (initJson.downloadUrl) {
-          finalDownloadUrl = initJson.downloadUrl;
-        } else if (initJson.progressUrl) {
-          // Step 2: Poll progress without blocking Vercel serverless execution
-          let resolved = false;
-          let attempts = 0;
-          const maxAttempts = 60;
+        // If direct stream URL is already known and doesn't require backend conversion
+        if (format.isDirect && format.url.startsWith('http') && !format.url.includes('youtube.com')) {
+          finalDownloadUrl = format.url;
+        } else {
+          // Step 1: Initialize serverless conversion task
+          const downloadPayload: Record<string, unknown> = {
+            action: 'init',
+            url: media.url,
+            resolution: format.resolution,
+            format: format.type === 'audio' ? format.extension : (format.resolution || '720'),
+            extension: format.extension,
+          };
 
-          while (!resolved && attempts < maxAttempts) {
-            attempts++;
-            await new Promise((r) => setTimeout(r, 1500));
+          const initRes = await fetch('/api/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(downloadPayload),
+          });
 
-            try {
-              const pollRes = await fetch('/api/download', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  action: 'progress',
-                  progressUrl: initJson.progressUrl,
-                }),
-              });
+          const initJson = await initRes.json();
+          if (!initJson.success) {
+            throw new Error(initJson.error || 'Could not initialize download. Please try another quality.');
+          }
 
-              if (pollRes.ok) {
-                const pollJson = await pollRes.json();
-                if (pollJson.success) {
-                  if (typeof pollJson.progress === 'number' && pollJson.progress > 0) {
-                    setDownloadProgress(Math.min(95, pollJson.progress));
-                  }
-                  if (pollJson.text) {
-                    setDownloadStatusText(`${pollJson.text} (${pollJson.progress || 0}%)`);
-                  }
+          if (initJson.downloadUrl) {
+            finalDownloadUrl = initJson.downloadUrl;
+          } else if (initJson.progressUrl) {
+            // Step 2: Poll progress without blocking Vercel serverless execution
+            let resolved = false;
+            let attempts = 0;
+            const maxAttempts = 60;
 
-                  if (pollJson.finished && pollJson.downloadUrl) {
-                    finalDownloadUrl = pollJson.downloadUrl;
-                    resolved = true;
-                    break;
+            while (!resolved && attempts < maxAttempts) {
+              attempts++;
+              await new Promise((r) => setTimeout(r, 1200));
+
+              try {
+                const pollRes = await fetch('/api/download', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    action: 'progress',
+                    progressUrl: initJson.progressUrl,
+                  }),
+                });
+
+                if (pollRes.ok) {
+                  const pollJson = await pollRes.json();
+                  if (pollJson.success) {
+                    if (typeof pollJson.progress === 'number' && pollJson.progress > 10) {
+                      setDownloadProgress((prev) => Math.max(prev, Math.min(92, pollJson.progress)));
+                    }
+
+                    if (pollJson.finished && pollJson.downloadUrl) {
+                      finalDownloadUrl = pollJson.downloadUrl;
+                      resolved = true;
+                      break;
+                    }
                   }
                 }
+              } catch (pollErr) {
+                // Retry on next interval
               }
-            } catch (pollErr) {
-              // Retry on next interval
+            }
+
+            if (!resolved || !finalDownloadUrl) {
+              throw new Error('Conversion took longer than expected. Please select another quality or try again.');
             }
           }
-
-          if (!resolved || !finalDownloadUrl) {
-            throw new Error('Conversion took longer than expected. Please select another quality or try again.');
-          }
         }
-      }
 
-      // Safety check: JANGAN PERNAH gunakan link youtube.com sebagai final download
-      if (finalDownloadUrl.includes('youtube.com/watch') || finalDownloadUrl.includes('youtu.be/')) {
-        throw new Error('Stream URL is not direct. Please choose another format option.');
-      }
+        // Stop the conversion polling ticker
+        if (progressTimer) {
+          clearInterval(progressTimer);
+          progressTimer = null;
+        }
 
-      // Step 3: Trigger Browser Download with optional trim parameters
-      setDownloadProgress(100);
+        // Safety check: JANGAN PERNAH gunakan link youtube.com sebagai final download
+        if (finalDownloadUrl.includes('youtube.com/watch') || finalDownloadUrl.includes('youtu.be/')) {
+          throw new Error('Stream URL is not direct. Please choose another format option.');
+        }
 
-      const downloadFilename = enableTrim
-        ? `${filename}_trimmed_${trimStartText.replace(/:/g, '-')}_to_${trimEndText.replace(/:/g, '-')}.${format.extension}`
-        : `${filename}.${format.extension}`;
+        // Step 3: Trigger Browser Download with optional trim parameters
+        setDownloadProgress(95);
 
-      const trimParams = enableTrim ? { trimStart: startSec, trimEnd: endSec } : undefined;
+        const downloadFilename = enableTrim
+          ? `${filename}_trimmed_${trimStartText.replace(/:/g, '-')}_to_${trimEndText.replace(/:/g, '-')}.${format.extension}`
+          : `${filename}.${format.extension}`;
 
-      setDownloadStatusText(enableTrim ? `Processing & downloading trimmed file (${trimStartText} to ${trimEndText})...` : 'Downloading to your Mac...');
-      setDownloadProgress(95);
+        const trimParams = enableTrim ? { trimStart: startSec, trimEnd: endSec } : undefined;
 
-      await triggerBrowserDownload(finalDownloadUrl, downloadFilename, trimParams, (status) => {
-        setDownloadStatusText(status);
-      });
+        setDownloadStatusText(
+          enableTrim
+            ? `Trimming & downloading file (${trimStartText} to ${trimEndText})...`
+            : 'Saving file to your Mac Downloads...'
+        );
 
-      setDownloadProgress(100);
+        await triggerBrowserDownload(finalDownloadUrl, downloadFilename, trimParams, (status) => {
+          setDownloadStatusText(status);
+        });
 
-      setDownloadSuccess(
-        enableTrim
-          ? `Downloaded trimmed ${format.label} (${trimStartText} to ${trimEndText})! Check your Downloads folder.`
-          : `Downloaded ${format.label}! Check your Mac Downloads folder.`
-      );
-      triggerConfetti();
+        setDownloadProgress(100);
+        setDownloadStatusText('Download complete!');
 
-      onDownloaded({
-        id: `${media.url}_${Date.now()}`,
-        title: enableTrim ? `${media.title} [${trimStartText}-${trimEndText}]` : media.title,
-        author: media.author,
-        thumbnail: media.thumbnail,
-        platform: media.platform,
-        url: media.url,
-        downloadedAt: Date.now(),
-        formatLabel: enableTrim
-          ? `Trimmed ${format.label} (${trimStartText}-${trimEndText})`
-          : `${format.label} (${format.extension.toUpperCase()})`,
-      });
+        setDownloadSuccess(
+          enableTrim
+            ? `Downloaded trimmed ${format.label} (${trimStartText} to ${trimEndText})! Check your Downloads folder.`
+            : `Downloaded ${format.label}! Check your Mac Downloads folder.`
+        );
+        triggerConfetti();
 
-      setTimeout(() => {
+        onDownloaded({
+          id: `${media.url}_${Date.now()}`,
+          title: enableTrim ? `${media.title} [${trimStartText}-${trimEndText}]` : media.title,
+          author: media.author,
+          thumbnail: media.thumbnail,
+          platform: media.platform,
+          url: media.url,
+          downloadedAt: Date.now(),
+          formatLabel: enableTrim
+            ? `Trimmed ${format.label} (${trimStartText}-${trimEndText})`
+            : `${format.label} (${format.extension.toUpperCase()})`,
+        });
+
+        setTimeout(() => {
+          setDownloadingId(null);
+          setDownloadProgress(0);
+          setDownloadStatusText('');
+        }, 3500);
+      } catch (err: any) {
+        if (progressTimer) clearInterval(progressTimer);
         setDownloadingId(null);
         setDownloadProgress(0);
         setDownloadStatusText('');
-      }, 3500);
-    } catch (err: any) {
-      setDownloadingId(null);
-      setDownloadProgress(0);
-      setDownloadStatusText('');
-      setDownloadError(err.message || 'Could not complete download. Please try another quality or format.');
-    }
+        setDownloadError(err.message || 'Could not complete download. Please try another quality or format.');
+      }
   };
 
   return (
@@ -560,7 +592,7 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
                       {isCurrentDownloading ? (
                         <>
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Preparing ({downloadProgress}%)</span>
+                          <span>Processing ({downloadProgress}%)</span>
                         </>
                       ) : (
                         <>
@@ -586,10 +618,10 @@ export default function MediaInspector({ media, onDownloaded }: MediaInspectorPr
               </span>
               <span className="font-mono">{downloadProgress}%</span>
             </div>
-            <div className="w-full h-1.5 bg-black/40 rounded-full overflow-hidden">
+            <div className="w-full h-2 bg-black/40 rounded-full overflow-hidden border border-white/5 relative">
               <div
-                className="h-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 transition-all duration-300"
-                style={{ width: `${downloadProgress}%` }}
+                className="h-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 transition-all duration-500 ease-out shadow-md shadow-indigo-500/40 rounded-full"
+                style={{ width: `${Math.max(3, downloadProgress)}%` }}
               />
             </div>
           </div>
