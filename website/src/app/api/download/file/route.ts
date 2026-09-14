@@ -31,8 +31,26 @@ export async function GET(req: NextRequest) {
   const endSec = trimEnd !== null ? parseFloat(trimEnd) : NaN;
   const hasTrim = !isNaN(startSec) && !isNaN(endSec) && endSec > startSec;
 
-  // Trim mode using ffmpeg
+  // Trim mode using ffmpeg (only works where ffmpeg binary is installed)
   if (hasTrim) {
+    // Check if ffmpeg is available on this system
+    let ffmpegAvailable = false;
+    try {
+      const { execSync } = require('child_process');
+      execSync('which ffmpeg 2>/dev/null || where ffmpeg 2>nul', { stdio: 'pipe' });
+      ffmpegAvailable = true;
+    } catch {
+      ffmpegAvailable = false;
+    }
+
+    if (!ffmpegAvailable) {
+      // ffmpeg not installed (e.g., Vercel serverless) — tell client to handle trim
+      return new NextResponse(
+        JSON.stringify({ error: 'ffmpeg_unavailable', message: 'Server-side trimming is not available in this environment. Client-side trimming will be used.' }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
     try {
       const duration = endSec - startSec;
       const ffmpegArgs: string[] = [
@@ -70,12 +88,30 @@ export async function GET(req: NextRequest) {
 
       const ff = spawn('ffmpeg', ffmpegArgs);
 
+      // Collect stderr for error diagnostics
+      let stderrOutput = '';
+      ff.stderr.on('data', (chunk) => {
+        stderrOutput += chunk.toString();
+      });
+
       const stream = new ReadableStream({
         start(controller) {
           ff.stdout.on('data', (chunk) => controller.enqueue(chunk));
-          ff.stdout.on('end', () => controller.close());
-          ff.stdout.on('error', (err) => controller.error(err));
-          ff.on('error', (err) => controller.error(err));
+          ff.stdout.on('end', () => {
+            try { controller.close(); } catch {}
+          });
+          ff.stdout.on('error', (err) => {
+            try { controller.error(err); } catch {}
+          });
+          ff.on('error', (err) => {
+            console.error('FFmpeg spawn error:', err.message);
+            try { controller.error(err); } catch {}
+          });
+          ff.on('close', (code) => {
+            if (code !== 0) {
+              console.error(`FFmpeg exited with code ${code}. stderr: ${stderrOutput.slice(-500)}`);
+            }
+          });
         },
         cancel() {
           ff.kill();
@@ -92,8 +128,9 @@ export async function GET(req: NextRequest) {
         status: 200,
         headers,
       });
-    } catch (trimErr) {
+    } catch (trimErr: any) {
       console.warn('FFmpeg trim error, falling back to full stream:', trimErr);
+      // Fall through to standard direct download below
     }
   }
 

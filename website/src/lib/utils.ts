@@ -1,4 +1,5 @@
 import { MediaPlatform } from './types';
+import { trimAudioFromUrl, trimVideoFromUrl } from './mediaTrimmer';
 
 export function formatDuration(seconds: number): string {
   if (!seconds || isNaN(seconds) || seconds < 0) return '00:00';
@@ -66,6 +67,29 @@ export function detectPlatform(url: string): { platform: MediaPlatform; platform
   }
 }
 
+/**
+ * Helper: save a Blob as a file download in the browser
+ */
+function saveBlobAsFile(blob: Blob, filename: string) {
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(blobUrl);
+  }, 5000);
+}
+
+/**
+ * Determine if a filename represents an audio format
+ */
+function isAudioFile(filename: string): boolean {
+  return /\.(mp3|wav|m4a|flac|aac|ogg|wma)$/i.test(filename);
+}
+
 export async function triggerBrowserDownload(
   downloadUrl: string,
   filename: string,
@@ -74,7 +98,7 @@ export async function triggerBrowserDownload(
 ): Promise<void> {
   if (typeof window === 'undefined') return;
 
-  // Blob or data URLs
+  // Blob or data URLs — direct download
   if (downloadUrl.startsWith('blob:') || downloadUrl.startsWith('data:')) {
     const a = document.createElement('a');
     a.href = downloadUrl;
@@ -87,43 +111,83 @@ export async function triggerBrowserDownload(
     return;
   }
 
-  // Stream directly through download endpoint with Content-Disposition: attachment
-  let secureEndpoint = `/api/download/file?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}`;
-  if (
+  const hasTrim =
     trimParams &&
     typeof trimParams.trimStart === 'number' &&
     typeof trimParams.trimEnd === 'number' &&
-    trimParams.trimEnd > trimParams.trimStart
-  ) {
+    trimParams.trimEnd > trimParams.trimStart;
+
+  // Build server endpoint URL
+  let secureEndpoint = `/api/download/file?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}`;
+  if (hasTrim) {
     secureEndpoint += `&trimStart=${trimParams.trimStart}&trimEnd=${trimParams.trimEnd}`;
   }
 
-  // If trimmed or audio, fetch blob so user sees exact progress and success only when file is ready
-  const isTrimmedOrAudio = !!trimParams || /\.(mp3|wav|m4a|flac|aac)$/i.test(filename);
+  const isTrimmedOrAudio = hasTrim || isAudioFile(filename);
+
   if (isTrimmedOrAudio) {
-    if (onStatusUpdate) {
-      onStatusUpdate('Downloading and saving file to your Mac...');
-    }
+    onStatusUpdate?.('Downloading media stream...');
 
+    // Attempt server-side download/trim first
     const res = await fetch(secureEndpoint);
-    if (!res.ok) {
-      throw new Error(`Download stream failed (HTTP ${res.status})`);
+
+    if (res.ok) {
+      // Server succeeded (ffmpeg available or no trim needed)
+      onStatusUpdate?.('Saving file to your device...');
+      const blob = await res.blob();
+      saveBlobAsFile(blob, filename);
+      return;
     }
 
-    const blob = await res.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(blobUrl);
-    }, 5000);
+    // Server returned error (503 = no ffmpeg, 500 = ffmpeg crashed, etc.)
+    console.warn(`Server-side download failed (HTTP ${res.status}), falling back to client-side processing...`);
+
+    if (hasTrim) {
+      // Client-side trimming fallback
+      // First, get the untrimmed stream from the server (without trim params)
+      const isAudio = isAudioFile(filename);
+
+      if (isAudio) {
+        onStatusUpdate?.('Using browser audio trimmer (server trim unavailable)...');
+        // trimAudioFromUrl handles fetching internally (direct + proxy fallback)
+        const trimmedBlob = await trimAudioFromUrl(
+          downloadUrl,
+          trimParams.trimStart!,
+          trimParams.trimEnd!,
+          onStatusUpdate
+        );
+        // trimAudioFromUrl always returns WAV format
+        const wavFilename = filename.replace(/\.[^.]+$/, '.wav');
+        saveBlobAsFile(trimmedBlob, wavFilename);
+        return;
+      } else {
+        // Video trim fallback
+        onStatusUpdate?.('Using browser video trimmer (server trim unavailable)...');
+        const result = await trimVideoFromUrl(
+          downloadUrl,
+          trimParams.trimStart!,
+          trimParams.trimEnd!,
+          onStatusUpdate
+        );
+        const videoFilename = filename.replace(/\.[^.]+$/, `.${result.extension}`);
+        saveBlobAsFile(result.blob, videoFilename);
+        return;
+      }
+    }
+
+    // No trim needed but server still failed — retry without trim params
+    onStatusUpdate?.('Retrying direct download...');
+    const directEndpoint = `/api/download/file?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}`;
+    const retryRes = await fetch(directEndpoint);
+    if (!retryRes.ok) {
+      throw new Error(`Download failed (HTTP ${retryRes.status}). The media source may be unavailable.`);
+    }
+    const blob = await retryRes.blob();
+    saveBlobAsFile(blob, filename);
     return;
   }
-  
+
+  // Non-audio, non-trimmed: use iframe for direct streaming download
   const iframe = document.createElement('iframe');
   iframe.style.display = 'none';
   iframe.src = secureEndpoint;
